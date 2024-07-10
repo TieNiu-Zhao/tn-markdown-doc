@@ -953,13 +953,20 @@ Electron 需求为：文件列表右键子菜单、文件导入、应用菜单�
   
   const FileList = ({ files, onFileClick, onSaveEdit, onFileDelete }) => {
       const [ editStatus, setEditStatus ] = useState(false)  // 编辑状态
-      const [ value, setValue ] = useState('')        // 编辑值
-      const enterPressed = useKeyPress(13)            // 是否按了 Enter 键
-      const escPressed = useKeyPress(27)              // 是否按了 Esc 键
+      const [ value, setValue ] = useState('')        	   // 编辑值
+      const enterPressed = useKeyPress(13)            	   // 是否按了 Enter 键
+      const escPressed = useKeyPress(27)             		   // 是否按了 Esc 键
+      let node = useRef(null)
       const closeSearch = () => {
           setEditStatus(false)
           setValue('')
       }
+      // 编辑状态自动获取焦点
+      useEffect(() => {
+          if (editStatus) {
+              node.current.focus()
+          }
+      }, [editStatus])
       useEffect(() => {
           if (enterPressed && editStatus) {
               const editItem = files.find(file => file.id === editStatus)
@@ -1024,7 +1031,9 @@ Electron 需求为：文件列表右键子菜单、文件导入、应用菜单�
                                   <div className='col-10'>
                                       <input
                                           className="form-control"
+                                          ref={node}
                                           value={value}
+                                          placeholder='请输入文件名称'
                                           onChange={(e) => { setValue(e.target.value) }}
                                       />
                                   </div>
@@ -1202,9 +1211,9 @@ Electron 需求为：文件列表右键子菜单、文件导入、应用菜单�
 
 ---
 
-## App 状态
+## App 状态与数据处理
 
-- 状态分析
+- 状态分析 - State
 
   |     需要的状态     |    变量名     | 类型 |
   | :----------------: | :-----------: | :--: |
@@ -1214,7 +1223,7 @@ Electron 需求为：文件列表右键子菜单、文件导入、应用菜单�
   | 已经打开的文件列表 |  openedFiles  | 数组 |
   |  当前被选中的文件  |  activeFile   | 对象 |
 
-  以上有大量重复内容，需要修改，搜索后的文件列表只需计算得到就好
+  以上**有大量重复内容**，需要修改，搜索后的文件列表只需计算得到就好（除了第一个，剩下的只存 id 即可）
 
   |     需要的状态     |    变量名    |          类型          |
   | :----------------: | :----------: | :--------------------: |
@@ -1223,58 +1232,554 @@ Electron 需求为：文件列表右键子菜单、文件导入、应用菜单�
   | 已经打开的文件列表 | openedFiles  |    数组[id, ..., ]     |
   |  当前被选中的文件  |  activeFile  |           id           |
 
-- 数据处理
+---
+
+- **数据处理**
 
   在 App.js 下，各个组件需要的回调已经暴露给了 App.js，所以要写相应的逻辑
 
+  回调数据流：
+
+  | 暴露给 App 的回调 | 暴露自哪个组件 |              功能               |
+  | :---------------: | :------------: | :-----------------------------: |
+  |   onFileSearch    |   FileSearch   |      告诉 App 要搜索的字符      |
+  |   onFileCreate    |   CreateBtn    |    告诉 App 点击了 CreateBtn    |
+  |    onFileClick    |    FileList    |     告诉 App 点击了哪个文件     |
+  |   onFileDelete    |    FileList    |      告诉 App 要删哪个文件      |
+  |    onFileEdit     |    FileList    |     告诉 App 要编辑哪个文件     |
+  |    onTabClick     |    TabList     |     告诉 App 点击了哪个 Tab     |
+  |    onCloseTab     |    TabList     |      告诉 App 要删哪个 Tab      |
+  |   onTextChange    |     Editor     | 告诉 App 编辑器里的字符发生改变 |
+
+  为 App.js 添加对应方法 - 伪代码
+
   ```jsx
-  function App() {
-    return (
-      <div className="App container-fluid px-0">
-        <...>
-            <FileSearch onFileSearch={() => {}}/>
-        <...>
-      </div>
-    );
+  const App = () => {
+      // 定义 files 状态与更新函数
+  	const [ files, setFiles ] = useState(defaultFiles)
+  	// 作为 onFileSearch 的回调函数
+  	const fileSearch = (value) => {
+          // 过滤获得文件列表
+  		const newFiles = files.filter(file => file.title.includes(value))
+  		setFiles(newFiles)
+  	}
+  	// ...
+  	const clickCreateFile = () => {
+          // ...
+  	}
+  	const fileDelete = (fileId) => {
+  		// ...
+  	}
+  	// ...
+  	return (
+  		<FileSearch onFileSearch={fileSearch}/>
+  		...
+      )
   }
-  function App() {
-    const [ files, setFiles ] = useState(defaultFiles)
-    const [ activeFileID, setActiveFileID ] =useState('')
-    const [ openedFileIDs, setOpenedFileIDs ] = useState([])
-    const [ unsavedFileIDs, setUnsavedFileIDs ] = useState([])
-    const openedFiles = openedFileIDs.map(openID => {
-      return files.find(file => file.id === openID)
-    })
-    const activeFile = files.find(file => file.id === activeFileID)
-    return (
-      <div className="App container-fluid px-0">
-        <div className='row no-gutters'>
-          <div><!-- 左侧 --></div>
-          <div className='col-9 right-panel'>
-            {
-              !activeFile &&
-              <div className='start-page'>
-                选择/创建新的 Markdown 文档
-              </div>
-            }
-            {
-              activeFile &&
+  ```
+
+
+---
+
+### 添加反向数据流
+
+即添加回调函数的交互
+
+1. **FileList 的 onFileClick**
+
+   ```jsx
+   const [ activeFileID, setActiveFileID ] = useState('')
+   const [ openedFileIDs, setOpenedFileIDs ] = useState([])
+   const fileClick = (fileID) => {
+   	// set 当前 ID 未活跃 ID
+   	setActiveFileID(fileID)
+       // 添加至右侧 TabList 里 - openedFileID
+   	if (!openedFileIDs.includes(fileID)) {
+   		setOpenedFileIDs([ ...openedFileIDs, fileID ])
+   	}
+   }
+   return <FileList onFileClick={fileClick}/>
+   ```
+
+2. **TabList 的 onTabClick**
+
+   ```jsx
+   const [ activeFileID, setActiveFileID ] = useState('')
+   const tabClick = (fileID) => {
+   	// 点谁就把 ID 设置为 activeID
+   	setActiveFileID(fileID)
+   }
+   const tabClose = (id) => {
+       // 从 openedFileIDs 中移除点击的 tab
+       const tabWithout = openedFileIDs.filter(fileID => fileID !== id)
+       setOpenedFileIDs(tabWithout)
+       // 删掉一个 tab 要高亮其他内容
+       if (tabWithout.length > 0) {
+   		setActiveFileID(tabWithout[0])
+       } else {
+   		setActiveFileID('')
+       }
+   }
+   return 
+   (
+       <TabList 
+           onTabClick={tabClick}
+           onCloseTab={tabClose}
+       />
+       <!-- SimpleMDE 为了区分不同文件要设置 key 值 -->
+   	<SimpleMDE key={activeFile && activeFile.id}/>
+   )
+   ```
+
+3. **SimpleMDE 的 FileChange**
+
+   文件改变时，要在 Tab上添加修改状态的点，即 setUnsavedFileIDs，并把 files 中的 body 更新。
+
+   ```jsx
+   const [ files, setFiles ] = useState(defaultFiles)
+   // 接收两个参数 改变的文件 id 和内容 value
+   const fileChange = (id, value) => {
+       // 更新 file
+       const newFiles = files.map(file => {
+   		if (file.id === id) {
+               file.body = value
+           }
+           return file
+       })
+       setFiles(newFiles)
+       // 未保存列表内添加 id
+       if (!unsavedFileIDs.includes(id)) {
+       	setUnsavedFileIDs([ ...unsavedFileIDs, id])
+       }
+   }
+   return <SimpleMDE (value) => {fileChange(activeFileID, value)}/>
+   ```
+
+4. **FileList 的 deleteFile**
+
+   删除文件
+
+   ```jsx
+   const [ files, setFiles ] = useState(defaultFiles)
+   const deleteFile = (id) => {
+       // 更新 files
+       const newFiles = files.filter(file => file.id !== id)
+       setFiles(newFiles)
+       // 关闭 tab - 调用上面的 tabClose
+       tabClose(id)
+   }
+   return <FileList onFileDelete={deleteFile}/>
+   ```
+
+5. **FileList 的 updateFileName**
+
+   编辑文件名字
+
+   ```jsx
+   const [ files, setFiles ] = useState(defaultFiles)
+   const updateFileName = (id, title) => {
+       const newFiles = files.map(file => {
+       	if (file.id === id) {
+   			file.title = title
+   		}
+       	return file
+       })
+       setFiles(newFiles)
+   }
+   return <FileList onSaveEdit={updateFileName}/>
+   ```
+
+6. **FileList 的 fileSearch**
+
+   这里不能直接操作 File 数组，因为许多内容都依靠 File 数组
+
+   比如用 File 数组的话，搜索后右侧编辑器会消失。
+
+   ```jsx
+   // 创建独立的 state
+   const [ searchedFiles, setsearchedFiles ] = useState([])
+   const fileSearch = (keyword) => {
+       const newFiles = files.filter(file => file.title.includes(keyword))
+       setsearchedFiles(newFiles)
+   }
+   // 左侧列表 - 假如 searchedFiles 里有内容就用 searchedFiles，否则用 files
+   const fileListArr = (searchedFiles.length > 0) ? searchedFiles : files
+   return (
+       <FileSearch onFileSearch={fileSearch}/>
+   	<FileList files={fileListArr}/>
+   )
+   ```
+
+   搜索后点击 fileSearch 上的关闭按钮 FileList 并没有还原成原本的样子，在 FileSearch.js 中退出搜索时添加一个空的搜索即可。
+
+   ```jsx
+   const FileSearch = ({ title, onFileSearch }) => {
+       const [ inputActive, setInputActive ] = useState(false) // 输入状态
+       const [ value, setValue ] = useState('')  				// 搜索框内容
+       const closeSearch = () => {
+           setInputActive(false)
+           setValue('')
+           onFileSearch('')									// 在这里添加空搜索
+       }
+       // ...
+   }
+   ```
+
+---
+
+### 新建文件 - 编辑与删除按钮
+
+- createNewFile 方法
+
+  使用 uuid 包生成唯一标识码作为文件的 id，使用 **npm install --save uuid** 安装。
+
+  为了使点击编辑按钮生成的新 file 处于编辑状态，添加新的状态 isNew。
+
+  ```jsx
+  import { v4 as uuidv4 } from 'uuid'
+  const createNewFile = () => {
+      // uid 为唯一识别码
+      const newID = uuidv4()
+      const newFiles = [
+      	...files,
+      	{
+  			id: newID,
+  			title: '',
+  			body: '## 请输入 Markdown',
+  			createdAt: new Date().getTime(),	// 获取当前时间
+  			isNew: true,						// 点击新建按钮要生成一个 focus 的编辑状态，用 isNew
+  		}
+      ]
+      setFiles(newFiles)
+  }
+  // 保存文件时调用此函数
+  const updateFileName = (id, title) => {
+      // 编辑更新标题
+      const newFiles = files.map(file => {
+        if (file.id === id) {
+          file.title = title
+          file.isNew = false			// 不再是 isNew 状态
+        }
+        return file
+      })
+      setFiles(newFiles)
+    }
+  return (
+      <FileList onSaveEdit={updateFileName}/>
+  	<BottomBtn onBtnClick={createNewFile}/>
+  )
+  ```
+  
+  并对 FileList.js 内做修改。
+  
+  ```jsx
+  const [ editStatus, setEditStatus ] = useState(false)  		// 编辑状态
+  const [ value, setValue ] = useState('')       				// 编辑值
+  
+  // 关闭搜索
+  const closeSearch = (editItem) => {
+      setEditStatus(false)
+      setValue('')
+      if (editItem.isNew) {
+          onFileDelete(editItem.id)
+      }
+  }
+  useEffect(() => {
+      const editItem = files.find(file => file.id === editStatus)
+  	if (enterPressed && editStatus && value.trim() !== '') { // 空状态不新建 file
+          // ...略
+      }
+      if (escPressed && editStatus) {
+          closeSearch()
+      }
+  })
+  // 当 files 有变化时运行
+  useEffect(() => {
+      const newFile = files.find(file => file.isNew)
+      if (newFile) {
+          setEditStatus(newFile.id)
+          setValue(newFile.title)
+      }
+  }, [files])
+  return (
+      // 用
+  	<li>
+      	{
+              ((file.id !== editStatus) && !file.isNew) &&
               <>
-                <TabList
-                  files={openedFiles}
-                  activeId={activeFileID}
-                  unsaveIds={unsavedFileIDs}
-                />
-                <SimpleMDE
-                  value={activeFile && activeFile.body}
-                />
+              	<!-- 编辑按钮与删除按钮 -->
               </>
-            }
-          </div>
-        </div>
-      </div>
-    );
+          }
+          {
+              ((file.id === editStatus) || file.isNew) &&
+              <>
+              	<!-- 编辑文件名称与关闭按钮 -->
+              	<input/>
+              	<button onClick={() => {closeSearch(file)}}></button>
+              </> 
+          }
+      </li>
+  )
+  ```
+  
+
+---
+
+### Flatten State - files 重构
+
+- 原因
+
+  有大量对 files 使用 map、filiter、find 的重复操作，因此在这里重构。将 files 内以键值对的 hashmap 来进行映射，比如：
+
+  ```jsx
+  const files = {
+      '1': { ...file },
+      '2': { ...file2 }
   }
+  ```
+
+  这样根据id 查找数据就变成了这样，而不需要 map、filiter、find...
+
+  ```jsx
+  const activeFile = files[activeFileID]						// 查
+  const modifiedFile = { ...files[id], title, isNew:false }	// 改
+  delete files[id]											// 删
+  ```
+
+  在 utils 下新建 helper.js 对原文件对象做 id 键值映射：
+
+  ```jsx
+  // 转换为 id - item 的键值形式对象
+  export const flattenArr = (arr) => {
+      // reduce 归并: 接收回调，参数为之前的结果与当前的值
+      return arr.reduce((map, item) => {
+          map[item.id] = item
+          return map
+      }, {})
+  }
+  // 转换回来
+  export const objToArr = (obj) => {
+      return Object.keys(obj).map(key => obj[key])
+  }
+  ```
+
+  执行 flattenArr() 可以将如下形式：
+  ```jsx
+  [
+    {
+      id: '1',
+      title: 'first post',
+      body: 'should be aware of this',
+      createdAt: 1462387424
+    },
+    {
+      id: '2',
+      title: 'second post',
+      body: '## this is the title',
+      createdAt: 22452637637
+    }
+  ]
+  ```
+
+  转化为：
+
+  ```jsx
+  {
+    '1': {
+      id: '1',
+      title: 'first post',
+      body: 'should be aware of this',
+      createdAt: 1462387424
+    },
+    '2': {
+      id: '2',
+      title: 'second post',
+      body: '## this is the title',
+      createdAt: 22452637637
+    }
+  }
+  ```
+
+  修改部分的 App.js 内容：
+
+  注意 fileChange 的修改，因为 files 是 state，注释的修改方式会有 bug，应该用展开成对象的方法修改。
+
+  ```jsx
+  import { flattenArr, objToArr } from './utils/helper'
+  function App() {
+    const [ files, setFiles ] = useState(flattenArr(defaultFiles))
+    const filesArr = objToArr(files)    // 有些要转换前文件格式
+    
+    const activeFile = files[activeFileID]
+    const openedFiles = openedFileIDs.map(openID => {
+      return files[openID]
+    })
+    const fileListArr = (searchedFiles.length > 0) ? searchedFiles : filesArr
+    const deleteFile = (id) => {
+      delete files[id]
+      setFiles(files)
+      // 关闭 tab
+      tabClose(id)
+    }
+    // 注意这儿
+    const fileChange = (id, value) => {
+      /* 修改前
+      const newFiles = files.map(file => {
+        if (file.id === id) {
+          file.body = value
+        }
+        return file
+        setFiles(newFiles)
+      })
+      */
+      // 尝试改为 files[id].body = value 逻辑没错但不能直接修改 State！
+      // 修改后：
+      const newFile = { ...files[id], body: value }
+      setFiles({ ...files, [id]: newFile })
+      // ...
+    }
+    const updateFileName = (id, title) => {
+      // 编辑更新标题
+      const modifiedFile = { ...files[id], title, isNew: false }
+      setFiles({ ...files, [id]: modifiedFile })
+    }
+    const fileSearch = (keyword) => {
+      const newFiles = filesArr.filter(file => file.title.includes(keyword))
+      // ...
+    }
+    const createNewFile = () => {
+      const newID = uuidv4()
+      const newFile = {
+        id: newID,
+        title: '',
+        body: '## 请输入 Markdown',
+        createdAt: new Date().getTime(),
+        isNew: true,
+      }
+      setFiles({ ...files, [newID]: newFile })
+    }
+  }
+  ```
+
+---
+
+## 数据持久化
+
+- electron 版本大于 12，引入 node 报错解决办法
+
+1. 创建 preload 脚本，可以在任意处创建
+
+   ```js
+   /* preload.js */
+   window.require = require		// 此文件中可使用所有nodejs API，将 require 拓展到 window 上
+   ```
+
+2. 在 main.js 中的窗口配置中添加参数
+
+   ```js
+   /* main.js */
+   import { app, BrowserWindow } from 'electron'
+   import isDev from 'electron-is-dev'
+   import path from 'path'
+   let mainWindow
+   const __dirname = path.resolve()            	// 用import 导入 path 模块时这样获取 __dirname
+   
+   app.on('ready', () => {
+       mainWindow = new BrowserWindow({
+           width: 1024,
+           height: 680,
+           webPreferences: {
+               preload: __dirname + 'preload.js',  // 添加preload文件参数
+               nodeIntegration: true,
+               contextIsolation: false             // 关闭上下文隔离
+           }
+       })
+       const urlLocation = isDev ? 'http://localhost:3000' :'dummyurl'
+       mainWindow.loadURL(urlLocation)
+   })
+   ```
+
+3. 这样就可以自由使用 nodejs API 了，相当于把 node 的模块挂在了 window 下
+
+   ```js
+   const fs = window.require('fs')
+   ```
+
+---
+
+### fs 模块简易封装
+
+- 简易封装
+
+  ```js
+  const fs = require('fs')
+  const path = require('path')
+  
+  const fileHelper = {
+      readFile: (path, cb) => {
+          fs.readFile(path, { encoding: 'utf-8' }, (err, data) => {
+              if (!err) {
+                  cb(data)
+              }
+          })
+      },
+      writeFile: (path, content, cb) => {
+          fs.writeFile(path, content, { encoding: 'utf-8' }, (err) => {
+              if (!err) {
+                  cb()
+              }
+          })
+      }
+  }
+  
+  // 文件读取与新建测试
+  const testPath = path.join(__dirname, 'helper.js')
+  const testWritePath = path.join(__dirname, 'hello.md')
+  fileHelper.readFile(testPath, (data) => {
+      console.log(data)
+  })
+  
+  fileHelper.writeFile(testWritePath, '你好顶针', () => {
+      console.log('写入成功')
+  })
+  ```
+
+- Promise 化
+
+  因为上面的读取和写入都是靠回调函数实现，一旦模式复杂，会导致回调函数地狱。nodejs 在10以上的版本的 fs 模块已经支持了 Promise 的 API
+
+  ```js
+  const fs = require('fs').promises						// 直接.promises 使用 Promise 化 API
+  const path = require('path')
+  
+  const fileHelper = {
+      // 读取
+      readFile: (path, cb) => {
+          return fs.readFile(path, { encoding: 'utf-8' })
+      },
+      // 写入
+      writeFile: (path, content) => {
+          return fs.writeFile(path, content, { encoding: 'utf-8' })
+      },
+      // 重命名
+      renameFile: (path, newPath) => {
+          return fs.rename(path, newPath)
+      },
+      // 删除
+      deleteFile: (path) => {
+          return fs.unlink(path)
+      }
+  }
+  
+  const testPath = path.join(__dirname, 'helper.js')
+  const testWritePath = path.join(__dirname, 'hello.md')
+  fileHelper.readFile(testPath).then((data) => {
+      console.log(data)
+  })
+  
+  fileHelper.writeFile(testWritePath, '你好顶针').then(() => {
+      console.log('成功')
+  })
   ```
 
   
