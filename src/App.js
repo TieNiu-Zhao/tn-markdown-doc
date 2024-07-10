@@ -2,6 +2,8 @@ import './App.css';
 import 'bootstrap/dist/css/bootstrap.min.css'
 import "easymde/dist/easymde.min.css"
 import { v4 as uuidv4 } from 'uuid'
+import { flattenArr, objToArr } from './utils/helper'
+import fileHelper from './utils/fileHelper'
 import { faPlus, faFileImport } from '@fortawesome/free-solid-svg-icons'
 import FileSearch from './components/FileSearch'
 import FileList from './components/FileList'
@@ -11,26 +13,30 @@ import TabList from './components/TabList'
 import SimpleMDE from 'react-simplemde-editor'
 import { useState } from 'react'
 
+// 使用 require js
+const { join } = window.require('path')
+const remote = window.require('@electron/remote')
+
 function App() {
-  const [ files, setFiles ] = useState(defaultFiles)
-  const [ activeFileID, setActiveFileID ] =useState('')
+  const [ files, setFiles ] = useState(flattenArr(defaultFiles))
+  const [ activeFileID, setActiveFileID ] = useState('')
   const [ openedFileIDs, setOpenedFileIDs ] = useState([])
   const [ unsavedFileIDs, setUnsavedFileIDs ] = useState([])
   const [ searchedFiles, setsearchedFiles ] = useState([])
-  const openedFiles = openedFileIDs.map(openID => {
-    return files.find(file => file.id === openID)
-  })
+  const filesArr = objToArr(files)    // 有些要转换前文件格式
+  const saveLocation = remote.app.getPath('documents')  // 使用remote.app.getPath() 拿到文件路径
+
   const fileClick = (fileID) => {
-    // set current active file
+    // set 当前 ID 未活跃 ID
     setActiveFileID(fileID)
-    // if openedFiles don't have the current ID
-    // then add new fileID to openedFiles
+    // 添加至右侧 TabList 里 - openedFileID
     if (!openedFileIDs.includes(fileID)) {
       setOpenedFileIDs([ ...openedFileIDs, fileID ])
     }
   }
 
   const tabClick = (fileID) => {
+    // 点谁就把 ID 设置为 activeID
     setActiveFileID(fileID)
   }
 
@@ -46,54 +52,63 @@ function App() {
     }
   }
   const fileChange = (id, value) => {
+    /* 修改前
     const newFiles = files.map(file => {
       if (file.id === id) {
         file.body = value
       }
       return file
+      setFiles(newFiles)
     })
-    setFiles(newFiles)
+    */
+    // 尝试改为 files[id].body = value 逻辑没错但不能直接修改 State！
+    // 修改后：
+    const newFile = { ...files[id], body: value }
+    setFiles({ ...files, [id]: newFile })
+
     if (!unsavedFileIDs.includes(id)) {
       setUnsavedFileIDs([ ...unsavedFileIDs, id])
     }
   }
   const deleteFile = (id) => {
-    const newFiles = files.filter(file => file.id !== id)
-    setFiles(newFiles)
+    delete files[id]
+    setFiles(files)
     // 关闭 tab
     tabClose(id)
   }
-  const updateFileName = (id, title) => {
+  const updateFileName = (id, title, isNew) => {
     // 编辑更新标题
-    const newFiles = files.map(file => {
-      if (file.id === id) {
-        file.title = title
-      }
-      return file
-    })
-    setFiles(newFiles)
+    const modifiedFile = { ...files[id], title, isNew: false }
+    if (isNew) {  // 新建
+      fileHelper.writeFile(join(saveLocation, `${title}.md`), files[id].body).then(() => {
+        setFiles({ ...files, [id]: modifiedFile })
+      })
+    } else {      // 更新标题
+
+    }
+    
   }
   const fileSearch = (keyword) => {
-    const newFiles = files.filter(file => file.title.includes(keyword))
+    const newFiles = filesArr.filter(file => file.title.includes(keyword))
     setsearchedFiles(newFiles)
   }
 
   const createNewFile = () => {
     const newID = uuidv4()
-    const newFiles = [
-      ...files,
-      {
-        id: newID,
-        title: '',
-        body: '请输入',
-        createdAt: new Date().getTime(),
-        isNew: true,
-      }
-    ]
-    setFiles(newFiles)
+    const newFile = {
+      id: newID,
+      title: '',
+      body: '## 请输入 Markdown',
+      createdAt: new Date().getTime(),
+      isNew: true,
+    }
+    setFiles({ ...files, [newID]: newFile })
   }
-  const activeFile = files.find(file => file.id === activeFileID)
-  const fileListArr = (searchedFiles.length > 0) ? searchedFiles : files
+  const activeFile = files[activeFileID]
+  const openedFiles = openedFileIDs.map(openID => {
+    return files[openID]
+  })
+  const fileListArr = (searchedFiles.length > 0) ? searchedFiles : filesArr
   return (
     <div className="App container-fluid px-0">
       <div className='row no-gutters'>

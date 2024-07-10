@@ -20,8 +20,8 @@ const FileList = ({ files, onFileClick, onSaveEdit, onFileDelete }) => {
     }
     useEffect(() => {
         const editItem = files.find(file => file.id === editStatus)
-        if (enterPressed && editStatus) {
-            onSaveEdit(editItem.id, value)
+        if (enterPressed && editStatus && value.trim() !== '') {
+            onSaveEdit(editItem.id, value, editItem.isNew)
             setEditStatus(false)
             setValue('')
         }
@@ -29,7 +29,14 @@ const FileList = ({ files, onFileClick, onSaveEdit, onFileDelete }) => {
             closeSearch()
         }
     })
+    // 编辑状态自动获取焦点
     useEffect(() => {
+        if (editStatus) {
+            node.current.focus()
+        }
+    }, [editStatus])
+    useEffect(() => {
+        // 当 files 有变化时运行
         const newFile = files.find(file => file.isNew)
         if (newFile) {
             setEditStatus(newFile.id)
