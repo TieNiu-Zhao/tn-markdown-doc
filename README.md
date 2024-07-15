@@ -1546,7 +1546,7 @@ Electron 需求为：文件列表右键子菜单、文件导入、应用菜单�
   delete files[id]											// 删
   ```
 
-  在 utils 下新建 helper.js 对原文件对象做 id 键值映射：
+  在 utils 下新建 helper.js 对原文件对象做 id 键值映射：<a id="objToArr">.</a>
 
   ```jsx
   // 转换为 id - item 的键值形式对象
@@ -1779,6 +1779,426 @@ Electron 需求为：文件列表右键子菜单、文件导入、应用菜单�
   
   fileHelper.writeFile(testWritePath, '你好顶针').then(() => {
       console.log('成功')
+  })
+  ```
+
+
+---
+
+### 在应用中使用本地文件
+
+- remote
+
+  这里 remote 遇到了点问题，remote 新版只能用 CommonJS 的 require 语法，而同样在 main.mjs 下的 electron-is-dev 新版只能用 ESM 的 import 语法，二者会冲突，解决办法为：
+
+  新建一个 remote.js 用 require 导入导出
+
+  ```js
+  /* remote.js */
+  const remote = require('@electron/remote/main')
+  module.exports = remote
+  
+  /* main.mjs */
+  import { app, BrowserWindow } from 'electron'
+  import isDev from 'electron-is-dev'
+  import path from 'path'
+  import remote from './remote.js'				   // 导入 remote
+  
+  let mainWindow
+  const __dirname = path.resolve()            	   // 用import 导入 path 模块时这样获取 __dirname
+  remote.initialize()                                // 初始化 remote
+  
+  app.on('ready', () => {
+      mainWindow = new BrowserWindow({
+          width: 1024,
+          height: 680,
+          webPreferences: {
+              preload: __dirname + 'preload.js',    // 添加preload文件参数
+              nodeIntegration: true,
+              contextIsolation: false               // 关闭上下文隔离
+          }
+      })
+      const urlLocation = isDev ? 'http://localhost:3000' : 'dummyurl'
+      mainWindow.loadURL(urlLocation)
+      remote.enable(mainWindow.webContents)          // window 新建后添加 remote 配置
+  })
+  ```
+
+- 在 App.js 中使用 fileHelper，关联本地文件操作
+
+  ```jsx
+  // 使用 require js
+  const { join } = window.require('path')
+  const remote = window.require('@electron/remote')
+  
+  function App() {
+  	const saveLocation = remote.app.getPath('documents')  // 使用remote.app.getPath() 拿到文件路径
+      // 根据 isNew 来区分是在修改文件名时调用还是新建文件时调用
+      const updateFileName = (id, title, isNew) => {
+      // 编辑更新标题
+      const modifiedFile = { ...files[id], title, isNew: false }
+      if (isNew) {  // 新建
+  		fileHelper.writeFile(join(saveLocation, `${title}.md`), 
+                               files[id].body).then(() => {
+          	setFiles({ ...files, [id]: modifiedFile })
+  		})
+      } else {      // 更新标题
+  		fileHelper.renameFile(join(saveLocation, `${files[id].title}.md`), 
+                              join(saveLocation, `${title}.md`)).then(() => {
+          	setFiles({ ...files, [id]: modifiedFile })
+      	})
+  	}
+      return (
+          <FileList onSaveEdit={updateFileName}/>
+      )
+  }
+  ```
+
+---
+
+### electron-store 持久化保存数据
+
+- 安装
+
+  ```bash
+  npm install electron-store@7.0.2 -save
+  ```
+
+  最新版只支持 import，但用 import 语法会导致 fs 等多个模块报错，还是用旧版吧，要在 main.mjs 中配置：
+
+  ```js
+  /* commonJSModule.js */
+  const remote = require('@electron/remote/main')
+  const Store = require('electron-store')
+  module.exports = {
+      remote,
+      Store
+  }
+  
+  /* main.mjs */
+  import { remote, Store }  from './commonJSModule.js'
+  Store.initRenderer()			// 初始化渲染
+  
+  /* App.js 使用方法 */
+  const Store = window.require('electron-store')
+  const store = new Store()
+  store.set('name', 'tieniu')
+  console.log(store.get('name'))
+  ```
+
+- 文件转化
+
+  目前的文件时大对象，对象中很多内容不需要存入持久化数据中，例如状态信息 isNew、文本主体 body（因为太长），所以要写一个函数将大对象转化为能存储的版本：
+
+  其中 objToArr 是前面写过的工具方法：[跳转](#objToArr)
+
+  ```js
+  const saveFileToStore = (files) => {
+    const fileStoreObj = objToArr(files).reduce((result, file) => {
+      const { id, path, title, createdAt } = file
+      result[id] = {
+        id,
+        path,
+        title,
+        createdAt
+      }
+      return result
+    }, {})
+    fileStore.set('files', fileStoreObj)
+  }
+  ```
+
+- 新建持久化
+
+  windows 持久化数据会存入 AppData 内项目同名中的 json 中
+
+  ```js
+  const fileStore = new Store({ 'name': 'Files Data' })
+  const [ files, setFiles ] = useState(fileStore.get('files') || {})
+  // 新建持久化修改
+  const updateFileName = (id, title, isNew) => {
+      const newPath = join(saveLocation, `${title}.md`)
+      // 编辑更新标题
+      const modifiedFile = { ...files[id], title, isNew: false, path: newPath }
+      const newFiles = { ...files, [id]: modifiedFile }
+      if (isNew) {  // 新建
+          fileHelper.writeFile(newPath, files[id].body).then(() => {
+              setFiles(newFiles)
+              saveFileToStore(newFiles)
+          })
+      } else {      // 更新标题
+          const oldPath = join(saveLocation, `${files[id].title}.md`)
+          fileHelper.renameFile(oldPath, newPath).then(() => {
+              setFiles(newFiles)
+              saveFileToStore(newFiles)
+          })
+      }
+  }
+  ```
+
+- 删除持久化
+
+  ```js
+  const deleteFile = (id) => {
+      fileHelper.deleteFile(files[id].path).then(() => {
+          delete files[id]
+          setFiles(files)
+          saveFileToStore(files)
+          // 关闭 tab
+          tabClose(id)
+      })
+  }
+  ```
+
+- 内容处理
+
+  持久化中没有存入内容 body，应该在点击文件时，用 fs 模块读取，但不需要每次点击都读取，用一个新状态 isLoaded 来判断是否是第一次读取，读取出的内容存到变量中。
+  
+  ```js
+  const fileClick = (fileID) => {
+      // set 当前 ID 未活跃 ID
+      setActiveFileID(fileID)
+      const currentFile = files[fileID]
+      if (!currentFile.isLoaded) {
+          fileHelper.readFile(currentFile.path).then(value => {
+          	const newFile = { ...files[fileID], body: value, isLoaded: true }
+          	setFiles({ ...files, [fileID]: newFile })
+      	})
+      }
+      // 添加至右侧 TabList 里 - openedFileID
+      if (!openedFileIDs.includes(fileID)) {
+      	setOpenedFileIDs([ ...openedFileIDs, fileID ])
+      }
+  }
+  ```
+
+---
+
+## 原生设置
+
+### Dialog - 原生导入文件
+
+- 导入文件
+
+  点击导入文件触发此函数，借用 remote 调用 dialog（也可以用 ipcRender 进程通信），showOpenDialog 返回 Promise，可以用then 拿到文件路径数组。
+
+  ```js
+  // dirname 可以获得去掉文件名的路径部分
+  const { join, basename, extname, dirname } = window.require('path')
+  const importFiles = () => {
+  	remote.dialog.showOpenDialog({
+          title: '选择导入的 markdown 文件',
+          properties: ['openFile', 'multiSelections'],
+          filters: [
+              {name: 'Markdown files', extensions: ['md']}
+          ]
+      }).then((result) => {
+          const paths = result.filePaths
+          if (Array.isArray(paths)) {
+              // 将路径数组过滤，看是否已经添加
+              const filteredFiles = paths.filter(path => {
+                  const alreadyAdded = Object.values(files).find(file => {
+                      return file.path === path
+                  })
+                  return !alreadyAdded
+              })
+              // 将 path 拓展为 files 的格式
+              const importFilesArr = filteredFiles.map(path => {
+                  return {
+                      id: uuidv4(),
+                      title: basename(path, extname(path)),
+                      path,
+                  }
+              })
+              // key-value 形式的对象
+              const newFiles = { ...files, ...flattenArr(importFilesArr) }
+              setFiles(newFiles)
+              saveFileToStore(newFiles)
+              if (importFilesArr.length > 0) {
+                  remote.dialog.showMessageBox({
+                      type: 'info',
+                      title: `成功导入了${importFilesArr.length}个文件`,
+                      message: `成功导入了${importFilesArr.length}个文件`
+  				})
+  			}
+  		}
+  	})
+  }
+  ```
+
+---
+
+### 上下文菜单
+
+使用 Menu 和 MenuItem 来实现菜单
+
+- 使用方法
+
+  这样在应用右键会出现上下文菜单，内容为打开、重命名和删除。
+
+  ```js
+  /* FileList.js */
+  const remote = window.require('@electron/remote')
+  const { Menu, MenuItem } = remote
+  useEffect(() => {
+      const menu = new Menu()
+      menu.append(new MenuItem({
+          label: '打开',
+          click: () => {
+              console.log('testOpen')
+          }
+      }))
+      menu.append(new MenuItem({
+          label: '重命名',
+          click: () => {
+              console.log('testRename')
+          }
+      }))
+      menu.append(new MenuItem({
+          label: '删除',
+          click: () => {
+              console.log('test')
+          }
+      }))
+      const handleContextMenu = (e) => {
+          menu.popup({window: remote.getCurrentWindow()})
+      }
+      window.addEventListener('contextmenu', handleContextMenu)
+      return () => {
+          window.removeEventListener('contextmenu', handleContextMenu)
+      }
+  })
+  ```
+
+- 封装为 Hook
+
+  ```js
+  /* useContextMenu.js */
+  import { useEffect, useRef } from 'react'
+  const remote = window.require('@electron/remote')
+  const { Menu, MenuItem } = remote
+  
+  // 没有 deps 会造成打开一个文件再开一个覆盖，永远只能开一个
+  const useContextMenu = (itemArr, targetSelctor, deps) => {
+      let clickedElement = useRef(null)
+      useEffect(() => {  
+          const menu = new Menu()
+          itemArr.forEach(item => {
+              menu.append(new MenuItem(item))
+          })
+          // useRef 可以在多次渲染中记住元素
+          const handleContextMenu = (e) => {
+              // 只有在特定 DOM 上右键才出现菜单
+              if (document.querySelector(targetSelctor).contains(e.target)) {
+                  clickedElement.current = e.target
+                  menu.popup({window: remote.getCurrentWindow()})
+              }
+          }
+          window.addEventListener('contextmenu', handleContextMenu)
+          return () => {
+              window.removeEventListener('contextmenu', handleContextMenu)
+          }
+      }, deps)
+      return clickedElement
+  }
+  
+  export default useContextMenu
+  ```
+
+  但是只能拿到 DOM 元素，而需要的是 file ID，可以**使用 data-{想加的内容} 来在 DOM 上储存信息，然后使用 HTMLElement.dataset 属性拿到该值**。
+
+  ```js
+  /* helper.js */
+  // 找到父节点 以拿到 dataset
+  export const getParentNode = (node, parentClassName) => {
+      let current = node
+      while (current !== null) {
+          if (current.classList.contains(parentClassName)) {
+              return current
+          }
+          current = current.parentNode
+      }
+      return false
+  }
+  
+  /* FileList.js */
+  import { getParentNode } from '../utils/helper.js'
+  const clickedItem = useContextMenu([
+      {
+          label: '打开',
+          click: () => {
+              const parentElement = getParentNode(clickedItem.current, 'file-item')
+              console.log(parentElement.dataset.id)		// 拿到 id
+          }
+      }const clickedItem = useContextMenu([
+          {
+              label: '打开',
+              click: () => {
+                  const parentElement = getParentNode(clickedItem.current, 'file-item')
+                  if (parentElement) {
+                      onFileClick(parentElement.dataset.id)
+                  }
+              }
+          },
+          {
+              label: '重命名',
+              click: () => {
+                  const parentElement = getParentNode(clickedItem.current, 'file-item')
+                  if (parentElement) {
+                      const {id, title} = parentElement.dataset
+                      setEditStatus(id)
+                      setValue(title)
+                  }
+              }
+          },
+          {
+              label: '删除',
+              click: () => {
+                  const parentElement = getParentNode(clickedItem.current, 'file-item')
+                  if (parentElement) {
+                      onFileDelete(parentElement.dataset.id)
+                  }
+              }
+          },
+      ], '.file-list', [files])
+  }
+  ```
+
+---
+
+### 内置菜单
+
+- 菜单配置项过长，略
+
+  以新建为例，通过 ipc 发送事件，在 App.js 中监听事件
+
+  ```js
+  /* menuTemplate.js */
+  const { app, shell } = require('electron')
+  
+  let template = [{
+      label: '文件',
+      submenu: [{
+          label: '新建',
+          accelerator: 'CmdOrCtrl+N',
+          // menuItem: 点击哪一项，browserWindow: 当前窗口，event: 事件名称
+          click: (menuItem, browserWindow, event) => {
+              browserWindow.webContents.send('create-new-file')
+          }
+      }, ...]
+  }]
+      
+  /* App.js */
+  useEffect(() => {
+      const callback = () => {
+          console.log('hello')
+      }
+      // 监听事件
+      ipcRenderer.on('create-new-file', callback)				// 点击新建触发回调 
+      // 清除订阅
+      return () => {
+  		ipcRenderer.removeListener('create-new-file', callback)
+      }
   })
   ```
 

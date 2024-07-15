@@ -4,31 +4,74 @@ import "easymde/dist/easymde.min.css"
 import { v4 as uuidv4 } from 'uuid'
 import { flattenArr, objToArr } from './utils/helper'
 import fileHelper from './utils/fileHelper'
-import { faPlus, faFileImport } from '@fortawesome/free-solid-svg-icons'
+import { faPlus, faFileImport, faSave } from '@fortawesome/free-solid-svg-icons'
 import FileSearch from './components/FileSearch'
 import FileList from './components/FileList'
 import BottomBtn from './components/BottomBtn'
-import defaultFiles from './utils/defaultFiles'
 import TabList from './components/TabList'
 import SimpleMDE from 'react-simplemde-editor'
-import { useState } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 
 // 使用 require js
-const { join } = window.require('path')
+// dirname 可以获得去掉文件名的路径部分
+const { join, basename, extname, dirname } = window.require('path')
+const { ipcRenderer } = window.require('electron')
 const remote = window.require('@electron/remote')
+const Store = window.require('electron-store')
+const fileStore = new Store({ 'name': 'Files Data' })
 
+// 这段 hook 放到 hooks 下引入会导致 fs、path 模块无法读取
+const useIpcRenderer = (keyCallbackMap) => {
+  useEffect(() => {
+      Object.keys(keyCallbackMap).forEach(key => {
+          ipcRenderer.on(key, keyCallbackMap[key])
+      })
+  })
+  // 清除副作用
+  return () => {
+      Object.keys(keyCallbackMap).forEach(key => {
+          ipcRenderer.removeListener(key, keyCallbackMap[key])
+      })
+  }
+}
+const saveFileToStore = (files) => {
+  // 不需要把所有文件信息存到持久化系统里，例如 isNew，body都不需要存
+  const fileStoreObj = objToArr(files).reduce((result, file) => {
+    const { id, path, title, createdAt } = file
+    result[id] = {
+      id,
+      path,
+      title,
+      createdAt
+    }
+    return result
+  }, {})
+  fileStore.set('files', fileStoreObj)
+}
 function App() {
-  const [ files, setFiles ] = useState(flattenArr(defaultFiles))
+  const [ files, setFiles ] = useState(fileStore.get('files') || {})
   const [ activeFileID, setActiveFileID ] = useState('')
   const [ openedFileIDs, setOpenedFileIDs ] = useState([])
   const [ unsavedFileIDs, setUnsavedFileIDs ] = useState([])
   const [ searchedFiles, setsearchedFiles ] = useState([])
   const filesArr = objToArr(files)    // 有些要转换前文件格式
   const saveLocation = remote.app.getPath('documents')  // 使用remote.app.getPath() 拿到文件路径
+  const activeFile = files[activeFileID]
+  const openedFiles = openedFileIDs.map(openID => {
+    return files[openID]
+  })
+  const fileListArr = (searchedFiles.length > 0) ? searchedFiles : filesArr
 
   const fileClick = (fileID) => {
     // set 当前 ID 未活跃 ID
     setActiveFileID(fileID)
+    const currentFile = files[fileID]
+    if (!currentFile.isLoaded) {
+      fileHelper.readFile(currentFile.path).then(value => {
+        const newFile = { ...files[fileID], body: value, isLoaded: true }
+        setFiles({ ...files, [fileID]: newFile })
+      })
+    }
     // 添加至右侧 TabList 里 - openedFileID
     if (!openedFileIDs.includes(fileID)) {
       setOpenedFileIDs([ ...openedFileIDs, fileID ])
@@ -52,47 +95,55 @@ function App() {
     }
   }
   const fileChange = (id, value) => {
-    /* 修改前
-    const newFiles = files.map(file => {
-      if (file.id === id) {
-        file.body = value
-      }
-      return file
-      setFiles(newFiles)
-    })
-    */
-    // 尝试改为 files[id].body = value 逻辑没错但不能直接修改 State！
-    // 修改后：
-    const newFile = { ...files[id], body: value }
-    setFiles({ ...files, [id]: newFile })
+    if (value !== files[id].body) {
+      const newFile = { ...files[id], body: value }
+      setFiles({ ...files, [id]: newFile })
 
-    if (!unsavedFileIDs.includes(id)) {
-      setUnsavedFileIDs([ ...unsavedFileIDs, id])
+      if (!unsavedFileIDs.includes(id)) {
+        setUnsavedFileIDs([ ...unsavedFileIDs, id])
+      }
     }
   }
   const deleteFile = (id) => {
-    delete files[id]
-    setFiles(files)
-    // 关闭 tab
-    tabClose(id)
-  }
-  const updateFileName = (id, title, isNew) => {
-    // 编辑更新标题
-    const modifiedFile = { ...files[id], title, isNew: false }
-    if (isNew) {  // 新建
-      fileHelper.writeFile(join(saveLocation, `${title}.md`), files[id].body).then(() => {
-        setFiles({ ...files, [id]: modifiedFile })
+    if (files[id].isNew) {
+      // delete files[id]
+      const { [id]: value , ...afterDelete } = files
+      // 这里如果 setFiles(files) 那 files 根本没变化，不会重新渲染
+      setFiles(afterDelete)
+    } else {
+      fileHelper.deleteFile(files[id].path).then(() => {
+        const { [id]: value , ...afterDelete } = files
+        setFiles(afterDelete)
+        saveFileToStore(afterDelete)
+        // 关闭 tab
+        tabClose(id)
       })
-    } else {      // 更新标题
-
     }
     
+  }
+  const updateFileName = (id, title, isNew) => {
+    // 旧文件就要去掉路径后的原名字拼接新名字，新文件使用户起的名字拼接路径
+    const newPath = isNew ? join(saveLocation, `${title}.md`) : join(dirname(files[id].path), `${title}.md`)
+    // 编辑更新标题
+    const modifiedFile = { ...files[id], title, isNew: false, path: newPath }
+    const newFiles = { ...files, [id]: modifiedFile }
+    if (isNew) {  // 新建
+      fileHelper.writeFile(newPath, files[id].body).then(() => {
+        setFiles(newFiles)
+        saveFileToStore(newFiles)
+      })
+    } else {      // 更新标题
+      const oldPath = files[id].path
+      fileHelper.renameFile(oldPath, newPath).then(() => {
+        setFiles(newFiles)
+        saveFileToStore(newFiles)
+      })
+    }
   }
   const fileSearch = (keyword) => {
     const newFiles = filesArr.filter(file => file.title.includes(keyword))
     setsearchedFiles(newFiles)
   }
-
   const createNewFile = () => {
     const newID = uuidv4()
     const newFile = {
@@ -104,11 +155,67 @@ function App() {
     }
     setFiles({ ...files, [newID]: newFile })
   }
-  const activeFile = files[activeFileID]
-  const openedFiles = openedFileIDs.map(openID => {
-    return files[openID]
+  
+  const saveCurrentFile = () => {
+    fileHelper.writeFile(activeFile.path, activeFile.body).then(() => {
+      // 不再是未保存状态
+      setUnsavedFileIDs(unsavedFileIDs.filter(id => id !== activeFile.id))
+    })
+  }
+  
+  // 把 MDE 选项用 useMemo 放在这里可以避免光标失焦
+  const mdeOptions = useMemo(() => {
+    return {
+      minHeight: '515px'
+    }
+  }, [])
+
+  const importFiles = () => {
+    remote.dialog.showOpenDialog({
+      title: '选择导入的 markdown 文件',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        {name: 'Markdown files', extensions: ['md']}
+      ]
+    }).then((result) => {
+      const paths = result.filePaths
+      if (Array.isArray(paths)) {
+        // 将路径数组过滤，看是否已经添加
+        const filteredFiles = paths.filter(path => {
+          const alreadyAdded = Object.values(files).find(file => {
+            return file.path === path
+          })
+          return !alreadyAdded
+        })
+        // 将 path 拓展为 files 的格式
+        const importFilesArr = filteredFiles.map(path => {
+          return {
+            id: uuidv4(),
+            title: basename(path, extname(path)),
+            path,
+          }
+        })
+        // key-value 形式的对象
+        const newFiles = { ...files, ...flattenArr(importFilesArr) }
+        setFiles(newFiles)
+        saveFileToStore(newFiles)
+        if (importFilesArr.length > 0) {
+          remote.dialog.showMessageBox({
+            type: 'info',
+            title: `成功导入了${importFilesArr.length}个文件`,
+            message: `成功导入了${importFilesArr.length}个文件`
+          })
+        }
+      }
+    })
+  }
+
+  useIpcRenderer({
+    'create-new-file': createNewFile,
+    'import-file': importFiles,
+    'save-edit-file': saveCurrentFile
   })
-  const fileListArr = (searchedFiles.length > 0) ? searchedFiles : filesArr
+
   return (
     <div className="App container-fluid px-0">
       <div className='row no-gutters'>
@@ -137,6 +244,7 @@ function App() {
                 text="导入"
                 colorClass="btn-success"
                 icon={faFileImport}
+                onBtnClick={importFiles}
               />
             </div>
           </div>
@@ -162,9 +270,13 @@ function App() {
                 key={activeFile && activeFile.id}
                 value={activeFile && activeFile.body}
                 onChange={(value) => {fileChange(activeFileID, value)}}
-                options={{
-                  minHeight: '515px'
-                }}
+                options={mdeOptions}
+              />
+              <BottomBtn
+                text="保存"
+                colorClass="btn-success"
+                icon={faSave}
+                onBtnClick={saveCurrentFile}
               />
             </>
           }
